@@ -120,17 +120,21 @@ def _start_capture(region):
     return "GDI", t2, stop2, q2, first2
 
 
-def _open_writer(out_path, fps, w, h):
-    """H.264 (avc1) nén nhẹ hơn mp4v ~6-7 lần cùng chất lượng/độ phân giải; cần openh264 DLL nên
-    fallback về mp4v (luôn có sẵn trong OpenCV) nếu máy thiếu DLL đó."""
-    writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
-    if writer.isOpened():
-        return writer
-    writer.release()
+def _open_writer(out_path, fps, w, h, fourccs=("avc1", "mp4v")):
+    """Thử lần lượt các codec trong fourccs (vd avc1=H.264 nén nhẹ hơn mp4v ~6-7 lần nhưng cần openh264
+    DLL); codec cuối cùng luôn là mp4v (luôn có sẵn trong OpenCV) nên writer trả về không bao giờ None."""
+    for fourcc in fourccs:
+        writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*fourcc), fps, (w, h))
+        if writer.isOpened():
+            return writer
+        writer.release()
     return cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
 
-def record(stop_event: threading.Event, out_path: str, status_cb=None, bbox=None, fps=DEFAULT_FPS, scale=1.0):
+def record(
+    stop_event: threading.Event, out_path: str, status_cb=None, bbox=None,
+    fps=DEFAULT_FPS, scale=1.0, fourccs=("avc1", "mp4v"),
+):
     """Ghi thẳng 1 lần vào file cuối cùng, đúng nhịp thời gian thực (interval cố định theo fps):
     lặp lại khung mới nhất nếu máy chưa kịp chụp khung mới, giống mọi phần mềm quay màn hình thật.
     Nhờ ghi đúng nhịp thời gian thực, số khung/fps luôn tự khớp thời lượng thực — không cần đo
@@ -146,7 +150,7 @@ def record(stop_event: threading.Event, out_path: str, status_cb=None, bbox=None
     interval = 1.0 / fps
     frames = 0
     latest = first
-    writer = _open_writer(out_path, fps, out_w, out_h)
+    writer = _open_writer(out_path, fps, out_w, out_h, fourccs)
     start = time.time()
     next_due = start
     try:
@@ -225,6 +229,11 @@ class RegionSelector:
 
 FPS_OPTIONS = [15, 24, 30, 60]
 SCALE_OPTIONS = {"100%": 1.0, "75%": 0.75, "50%": 0.5}
+FORMAT_OPTIONS = {
+    "MP4": (".mp4", ("avc1", "mp4v")),
+    "MOV": (".mov", ("avc1", "mp4v")),
+    "AVI": (".avi", ("XVID", "MJPG")),
+}
 
 # Dark theme (slate + teal accent, red for recording state).
 BG = "#0F172A"
@@ -334,6 +343,12 @@ class App:
             opts, textvariable=self.scale_var, values=list(SCALE_OPTIONS.keys()),
             state="readonly", width=6, style="Dark.TCombobox",
         ).grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(2, 0))
+        tk.Label(opts, text="Định dạng", font=FONT, fg=MUTED, bg=BG).grid(row=0, column=2, sticky="w", padx=(20, 0))
+        self.format_var = tk.StringVar(value="MP4")
+        ttk.Combobox(
+            opts, textvariable=self.format_var, values=list(FORMAT_OPTIONS.keys()),
+            state="readonly", width=6, style="Dark.TCombobox",
+        ).grid(row=1, column=2, sticky="w", padx=(20, 0), pady=(2, 0))
 
         btns = tk.Frame(container, bg=BG)
         btns.pack(fill="x")
@@ -370,12 +385,14 @@ class App:
     def start(self):
         default_dir = os.path.join(_app_base_dir(), "recordings")
         os.makedirs(default_dir, exist_ok=True)
+        fmt = self.format_var.get()
+        ext, _ = FORMAT_OPTIONS[fmt]
         out_path = filedialog.asksaveasfilename(
             title="Chọn nơi lưu video",
             initialdir=default_dir,
-            initialfile=datetime.now().strftime("record_%Y%m%d_%H%M%S.mp4"),
-            defaultextension=".mp4",
-            filetypes=[("Video MP4", "*.mp4")],
+            initialfile=datetime.now().strftime(f"record_%Y%m%d_%H%M%S{ext}"),
+            defaultextension=ext,
+            filetypes=[(f"Video {fmt}", f"*{ext}")],
         )
         if not out_path:
             return  # người dùng bấm Cancel -> không quay
@@ -403,6 +420,7 @@ class App:
                 "bbox": bbox,
                 "fps": int(self.fps_var.get()),
                 "scale": SCALE_OPTIONS[self.scale_var.get()],
+                "fourccs": FORMAT_OPTIONS[self.format_var.get()][1],
             },
             daemon=True,
         )
