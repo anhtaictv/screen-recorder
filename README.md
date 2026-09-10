@@ -1,6 +1,6 @@
 # Screen Recorder
 
-**v1.1.0**
+**v1.2.0**
 
 Quay màn hình offline (không tiếng) trên Windows, GUI Tkinter. Chọn vùng quay bằng cách kéo chuột hoặc quay full màn hình, xuất thẳng ra file MP4.
 
@@ -40,3 +40,17 @@ python screen_recorder.py --selftest
 ```
 
 Quay thử ~1s, kiểm tra file MP4 sinh ra hợp lệ.
+
+## Lịch sử cập nhật
+
+### v1.2.0 — 2026-09-10
+- Thiết kế lại giao diện: dark theme (slate + accent teal), nút bấm custom có hover, dropdown FPS/chất lượng theo theme tối, timer font đều nét, cửa sổ tự canh giữa màn hình.
+
+### v1.1.0 — 2026-09-10
+- Đồng hồ đếm giờ quay + chấm đỏ nhấp nháy khi đang ghi
+- Nút "Mở thư mục vừa lưu" sau khi Stop
+- Hotkey toàn cục F9 để Start/Stop
+- Chọn FPS (15/24/30/60) và chất lượng (100%/75%/50%) ngay trong GUI
+
+### v1.0.0 — 2026-09-10
+- Bản đầu: quay màn hình/vùng chọn, tự dò backend DXGI/GDI, xuất MP4 H.264 (fallback mp4v), chọn nơi lưu file khi bắt đầu quay.
