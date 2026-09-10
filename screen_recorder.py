@@ -39,7 +39,12 @@ if getattr(sys, "frozen", False):
     except Exception:
         pass
 
-MAX_FPS = 30  # trần fps mong muốn; fps thực dùng để ghi file được đo tự động (trần vật lý của máy có thể thấp hơn)
+DEFAULT_FPS = 30  # trần fps mặc định; GUI cho chọn lại (15/24/30/60)
+
+try:
+    import keyboard  # hotkey toàn cục F9; thiếu lib hoặc môi trường chặn hook bàn phím (RDP/VM) -> bỏ qua
+except Exception:
+    keyboard = None
 
 
 def _bbox_to_region(bbox):
@@ -125,21 +130,23 @@ def _open_writer(out_path, fps, w, h):
     return cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
 
-def record(stop_event: threading.Event, out_path: str, status_cb=None, bbox=None):
-    """Ghi thẳng 1 lần vào file cuối cùng, đúng nhịp thời gian thực (interval cố định theo MAX_FPS):
+def record(stop_event: threading.Event, out_path: str, status_cb=None, bbox=None, fps=DEFAULT_FPS, scale=1.0):
+    """Ghi thẳng 1 lần vào file cuối cùng, đúng nhịp thời gian thực (interval cố định theo fps):
     lặp lại khung mới nhất nếu máy chưa kịp chụp khung mới, giống mọi phần mềm quay màn hình thật.
-    Nhờ ghi đúng nhịp thời gian thực, số khung/MAX_FPS luôn tự khớp thời lượng thực — không cần đo
-    trước hay mã hoá lại (remux) sau khi quay xong, nên bấm Stop là lưu xong ngay lập tức."""
+    Nhờ ghi đúng nhịp thời gian thực, số khung/fps luôn tự khớp thời lượng thực — không cần đo
+    trước hay mã hoá lại (remux) sau khi quay xong, nên bấm Stop là lưu xong ngay lập tức.
+    scale: tỉ lệ thu nhỏ khung hình trước khi ghi (vd 0.75) để giảm dung lượng file, 1.0 = giữ nguyên."""
     region = _bbox_to_region(bbox)
     backend_name, cap_thread, cap_stop, q, first = _start_capture(region)
     if status_cb:
         status_cb(f"Backend: {backend_name}")
     h, w = first.shape[:2]
+    out_w, out_h = (int(w * scale), int(h * scale)) if scale != 1.0 else (w, h)
 
-    interval = 1.0 / MAX_FPS
+    interval = 1.0 / fps
     frames = 0
     latest = first
-    writer = _open_writer(out_path, MAX_FPS, w, h)
+    writer = _open_writer(out_path, fps, out_w, out_h)
     start = time.time()
     next_due = start
     try:
@@ -153,11 +160,12 @@ def record(stop_event: threading.Event, out_path: str, status_cb=None, bbox=None
             if now < next_due:
                 time.sleep(min(next_due - now, 0.01))
                 continue
-            writer.write(latest)
+            frame = cv2.resize(latest, (out_w, out_h)) if scale != 1.0 else latest
+            writer.write(frame)
             frames += 1
             next_due += interval
             if status_cb:
-                status_cb(f"[{backend_name}] Recording... {frames} frames ({frames/MAX_FPS:.0f}s)")
+                status_cb(f"[{backend_name}] Recording... {frames} frames ({frames/fps:.0f}s)")
     finally:
         writer.release()
         cap_stop.set()
@@ -215,20 +223,59 @@ class RegionSelector:
         return None
 
 
+FPS_OPTIONS = [15, 24, 30, 60]
+SCALE_OPTIONS = {"100%": 1.0, "75%": 0.75, "50%": 0.5}
+
+
 class App:
     def __init__(self, root):
         self.root = root
         root.title("Screen Recorder (offline, no audio)")
         self.stop_event = None
         self.thread = None
+        self.out_path = None
+        self._blink_on = False
 
-        self.status = tk.StringVar(value="Ready")
-        tk.Label(root, textvariable=self.status, width=40).pack(padx=10, pady=10)
+        top = tk.Frame(root)
+        top.pack(padx=10, pady=(10, 0))
+        self.rec_dot = tk.Label(top, text="●", fg=root.cget("bg"), font=("Segoe UI", 12))
+        self.rec_dot.pack(side=tk.LEFT)
+        self.timer_var = tk.StringVar(value="00:00")
+        tk.Label(top, textvariable=self.timer_var, font=("Segoe UI", 12)).pack(side=tk.LEFT, padx=(4, 0))
+
+        hotkey_hint = "  |  F9 = Start/Stop" if keyboard is not None else ""
+        self.status = tk.StringVar(value=f"Ready{hotkey_hint}")
+        tk.Label(root, textvariable=self.status, width=44).pack(padx=10, pady=8)
+
+        opts = tk.Frame(root)
+        opts.pack(pady=(0, 5))
+        tk.Label(opts, text="FPS:").grid(row=0, column=0, padx=(0, 4))
+        self.fps_var = tk.IntVar(value=DEFAULT_FPS)
+        tk.OptionMenu(opts, self.fps_var, *FPS_OPTIONS).grid(row=0, column=1)
+        tk.Label(opts, text="Chất lượng:").grid(row=0, column=2, padx=(10, 4))
+        self.scale_var = tk.StringVar(value="100%")
+        tk.OptionMenu(opts, self.scale_var, *SCALE_OPTIONS.keys()).grid(row=0, column=3)
 
         self.start_btn = tk.Button(root, text="Start (chọn vùng)", width=20, command=self.start)
         self.start_btn.pack(pady=5)
         self.stop_btn = tk.Button(root, text="Stop", width=20, command=self.stop, state=tk.DISABLED)
         self.stop_btn.pack(pady=5)
+        self.open_folder_btn = tk.Button(
+            root, text="Mở thư mục vừa lưu", width=20, command=self.open_folder, state=tk.DISABLED
+        )
+        self.open_folder_btn.pack(pady=(0, 10))
+
+        if keyboard is not None:
+            try:
+                keyboard.add_hotkey("f9", lambda: self.root.after(0, self.toggle_record))
+            except Exception:
+                pass  # ponytail: hook bàn phím có thể bị chặn (RDP/VM/quyền) -> im lặng bỏ qua, nút bấm vẫn chạy
+
+    def toggle_record(self):
+        if str(self.stop_btn["state"]) == tk.NORMAL:
+            self.stop()
+        else:
+            self.start()
 
     def start(self):
         default_dir = os.path.join(_app_base_dir(), "recordings")
@@ -243,6 +290,7 @@ class App:
         if not out_path:
             return  # người dùng bấm Cancel -> không quay
         self.out_path = out_path
+        self.open_folder_btn.config(state=tk.DISABLED)
         self.root.withdraw()  # ẩn cửa sổ chính để không lọt vào khung chọn/video
         self.root.after(150, lambda: self._pick_region_and_record(out_path))
 
@@ -253,13 +301,19 @@ class App:
 
         self.status.set(f"Sẽ lưu vào: {out_path}")
         self.stop_event = threading.Event()
+        self._rec_start = time.time()
         # Tkinter chỉ an toàn khi thao tác từ 1 thread duy nhất (kể cả gọi after() từ thread khác cũng
         # có thể làm treo Tcl interpreter) -> thread nền chỉ ghi vào biến thường, thread chính tự poll.
         self._latest_status = ["Recording..."]
         self.thread = threading.Thread(
             target=record,
             args=(self.stop_event, out_path),
-            kwargs={"status_cb": lambda s: self._latest_status.__setitem__(0, s), "bbox": bbox},
+            kwargs={
+                "status_cb": lambda s: self._latest_status.__setitem__(0, s),
+                "bbox": bbox,
+                "fps": self.fps_var.get(),
+                "scale": SCALE_OPTIONS[self.scale_var.get()],
+            },
             daemon=True,
         )
         self.thread.start()
@@ -270,7 +324,11 @@ class App:
     def _poll_status(self):
         if self.thread and self.thread.is_alive():
             self.status.set(self._latest_status[0])
-            self.root.after(100, self._poll_status)
+            elapsed = int(time.time() - self._rec_start)
+            self.timer_var.set(f"{elapsed // 60:02d}:{elapsed % 60:02d}")
+            self._blink_on = not self._blink_on
+            self.rec_dot.config(fg="red" if self._blink_on else self.root.cget("bg"))
+            self.root.after(500, self._poll_status)
 
     def stop(self):
         if self.stop_event:
@@ -283,9 +341,15 @@ class App:
         if self.thread and self.thread.is_alive():
             self.root.after(100, self._wait_finish)
             return
+        self.rec_dot.config(fg=self.root.cget("bg"))
         self.status.set(f"Đã lưu: {self.out_path}")
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
+        self.open_folder_btn.config(state=tk.NORMAL)
+
+    def open_folder(self):
+        if self.out_path:
+            os.startfile(os.path.dirname(self.out_path))
 
 
 def selftest():

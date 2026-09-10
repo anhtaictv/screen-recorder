@@ -1,6 +1,6 @@
 # Screen Recorder
 
-**v1.0.0**
+**v1.1.0**
 
 Quay màn hình offline (không tiếng) trên Windows, GUI Tkinter. Chọn vùng quay bằng cách kéo chuột hoặc quay full màn hình, xuất thẳng ra file MP4.
 
@@ -8,18 +8,22 @@ Quay màn hình offline (không tiếng) trên Windows, GUI Tkinter. Chọn vùn
 
 - Chọn vùng quay tuỳ ý (kéo chuột) hoặc `Esc` để quay full màn hình
 - Tự dò backend chụp màn hình: ưu tiên **DXGI/GPU** (`dxcam`, nhanh) và tự rơi về **GDI** (`mss`, luôn chạy được) nếu máy không hỗ trợ
-- Ghi đúng nhịp thời gian thực (30 FPS), không cần remux sau khi dừng → bấm Stop là lưu xong ngay
+- Ghi đúng nhịp thời gian thực, không cần remux sau khi dừng → bấm Stop là lưu xong ngay
 - Mã hoá H.264 (`avc1`), tự fallback `mp4v` nếu thiếu OpenH264 DLL
 - Chọn nơi lưu file khi bắt đầu quay (hộp thoại Save As)
+- Chọn **FPS** (15/24/30/60) và **chất lượng** (100%/75%/50% độ phân giải) ngay trong GUI
+- Đồng hồ đếm giờ quay + chấm đỏ nhấp nháy khi đang ghi
+- Nút **"Mở thư mục vừa lưu"** sau khi Stop
+- Hotkey toàn cục **F9** để Start/Stop nhanh (cần lib `keyboard`, thiếu thì tự tắt tính năng này, nút bấm vẫn chạy bình thường)
 
 ## Cài đặt & chạy từ source
 
 ```bash
-pip install opencv-python mss numpy dxcam
+pip install opencv-python mss numpy dxcam keyboard
 python screen_recorder.py
 ```
 
-`dxcam` là tuỳ chọn — thiếu vẫn chạy được, chỉ chậm hơn (GDI).
+`dxcam` và `keyboard` là tuỳ chọn — thiếu vẫn chạy được (mất GPU-accel hoặc hotkey F9), không crash.
 
 ## Đóng gói thành exe
 
