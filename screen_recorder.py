@@ -5,7 +5,7 @@ import time
 import queue
 import threading
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 from datetime import datetime
 
 import cv2
@@ -226,50 +226,140 @@ class RegionSelector:
 FPS_OPTIONS = [15, 24, 30, 60]
 SCALE_OPTIONS = {"100%": 1.0, "75%": 0.75, "50%": 0.5}
 
+# Dark theme (slate + teal accent, red for recording state).
+BG = "#0F172A"
+SURFACE = "#1E293B"
+BORDER = "#334155"
+TEXT = "#F1F5F9"
+MUTED = "#94A3B8"
+ACCENT = "#14B8A6"
+ACCENT_HOVER = "#0D9488"
+DANGER = "#EF4444"
+DANGER_HOVER = "#DC2626"
+DISABLED_BG = "#1E293B"
+DISABLED_FG = "#64748B"
+
+FONT = ("Segoe UI", 10)
+FONT_BOLD = ("Segoe UI", 10, "bold")
+FONT_TITLE = ("Segoe UI", 14, "bold")
+FONT_MONO = ("Consolas", 13, "bold")  # số liệu (timer) dùng font đều nét, tránh nhảy layout khi đổi số
+
+
+def _mk_button(parent, text, command, base_bg, hover_bg, fg=TEXT):
+    """Nút bấm màu phẳng tự vẽ (tk.Button, không phải ttk) — ttk.Button trên Windows theme mặc định
+    bỏ qua màu nền tuỳ chỉnh, còn tk.Button thì tôn trọng bg/fg nên mới style được theo palette riêng."""
+    btn = tk.Button(
+        parent, text=text, command=command, bg=base_bg, fg=fg,
+        activebackground=hover_bg, activeforeground=fg,
+        relief="flat", bd=0, font=FONT_BOLD, cursor="hand2", padx=16, pady=10,
+        disabledforeground=DISABLED_FG,
+    )
+    btn._base_bg, btn._hover_bg = base_bg, hover_bg
+    btn.bind("<Enter>", lambda e: btn.config(bg=hover_bg) if str(btn["state"]) != "disabled" else None)
+    btn.bind("<Leave>", lambda e: btn.config(bg=base_bg) if str(btn["state"]) != "disabled" else None)
+    return btn
+
+
+def _btn_set_enabled(btn, enabled):
+    if enabled:
+        btn.config(state=tk.NORMAL, bg=btn._base_bg, cursor="hand2")
+    else:
+        btn.config(state=tk.DISABLED, bg=DISABLED_BG, cursor="arrow")
+
 
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("Screen Recorder (offline, no audio)")
+        root.title("Screen Recorder")
+        root.configure(bg=BG)
+        root.resizable(False, False)
         self.stop_event = None
         self.thread = None
         self.out_path = None
         self._blink_on = False
 
-        top = tk.Frame(root)
-        top.pack(padx=10, pady=(10, 0))
-        self.rec_dot = tk.Label(top, text="●", fg=root.cget("bg"), font=("Segoe UI", 12))
+        style = ttk.Style()
+        style.theme_use("clam")  # theme 'clam' là theme duy nhất tôn trọng màu nền tuỳ chỉnh cho Combobox trên Windows
+        style.configure(
+            "Dark.TCombobox", fieldbackground=SURFACE, background=SURFACE, foreground=TEXT,
+            arrowcolor=TEXT, bordercolor=BORDER, lightcolor=SURFACE, darkcolor=SURFACE, padding=4,
+        )
+        style.map("Dark.TCombobox", fieldbackground=[("readonly", SURFACE)], foreground=[("readonly", TEXT)])
+        root.option_add("*TCombobox*Listbox.background", SURFACE)
+        root.option_add("*TCombobox*Listbox.foreground", TEXT)
+        root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+
+        container = tk.Frame(root, bg=BG)
+        container.pack(padx=20, pady=18)
+
+        tk.Label(container, text="Screen Recorder", font=FONT_TITLE, fg=TEXT, bg=BG).pack(anchor="w")
+        tk.Label(
+            container, text="Quay màn hình offline · không tiếng", font=FONT, fg=MUTED, bg=BG,
+        ).pack(anchor="w", pady=(0, 14))
+
+        card = tk.Frame(container, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
+        card.pack(fill="x", pady=(0, 14))
+        card_pad = tk.Frame(card, bg=SURFACE)
+        card_pad.pack(fill="x", padx=16, pady=14)
+
+        rec_row = tk.Frame(card_pad, bg=SURFACE)
+        rec_row.pack(fill="x")
+        self.rec_dot = tk.Canvas(rec_row, width=12, height=12, bg=SURFACE, highlightthickness=0)
+        self._rec_dot_id = self.rec_dot.create_oval(2, 2, 10, 10, fill=SURFACE, outline="")
         self.rec_dot.pack(side=tk.LEFT)
         self.timer_var = tk.StringVar(value="00:00")
-        tk.Label(top, textvariable=self.timer_var, font=("Segoe UI", 12)).pack(side=tk.LEFT, padx=(4, 0))
-
-        hotkey_hint = "  |  F9 = Start/Stop" if keyboard is not None else ""
-        self.status = tk.StringVar(value=f"Ready{hotkey_hint}")
-        tk.Label(root, textvariable=self.status, width=44).pack(padx=10, pady=8)
-
-        opts = tk.Frame(root)
-        opts.pack(pady=(0, 5))
-        tk.Label(opts, text="FPS:").grid(row=0, column=0, padx=(0, 4))
-        self.fps_var = tk.IntVar(value=DEFAULT_FPS)
-        tk.OptionMenu(opts, self.fps_var, *FPS_OPTIONS).grid(row=0, column=1)
-        tk.Label(opts, text="Chất lượng:").grid(row=0, column=2, padx=(10, 4))
-        self.scale_var = tk.StringVar(value="100%")
-        tk.OptionMenu(opts, self.scale_var, *SCALE_OPTIONS.keys()).grid(row=0, column=3)
-
-        self.start_btn = tk.Button(root, text="Start (chọn vùng)", width=20, command=self.start)
-        self.start_btn.pack(pady=5)
-        self.stop_btn = tk.Button(root, text="Stop", width=20, command=self.stop, state=tk.DISABLED)
-        self.stop_btn.pack(pady=5)
-        self.open_folder_btn = tk.Button(
-            root, text="Mở thư mục vừa lưu", width=20, command=self.open_folder, state=tk.DISABLED
+        tk.Label(rec_row, textvariable=self.timer_var, font=FONT_MONO, fg=TEXT, bg=SURFACE).pack(
+            side=tk.LEFT, padx=(6, 0)
         )
-        self.open_folder_btn.pack(pady=(0, 10))
+        if keyboard is not None:
+            tk.Label(rec_row, text="F9 · Start / Stop", font=FONT, fg=MUTED, bg=SURFACE).pack(side=tk.RIGHT)
+
+        self.status = tk.StringVar(value="Ready")
+        tk.Label(
+            card_pad, textvariable=self.status, font=FONT, fg=MUTED, bg=SURFACE,
+            wraplength=280, justify="left", anchor="w",
+        ).pack(fill="x", pady=(8, 0))
+
+        opts = tk.Frame(container, bg=BG)
+        opts.pack(fill="x", pady=(0, 14))
+        tk.Label(opts, text="FPS", font=FONT, fg=MUTED, bg=BG).grid(row=0, column=0, sticky="w")
+        self.fps_var = tk.StringVar(value=str(DEFAULT_FPS))
+        ttk.Combobox(
+            opts, textvariable=self.fps_var, values=[str(v) for v in FPS_OPTIONS],
+            state="readonly", width=6, style="Dark.TCombobox",
+        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        tk.Label(opts, text="Chất lượng", font=FONT, fg=MUTED, bg=BG).grid(row=0, column=1, sticky="w", padx=(20, 0))
+        self.scale_var = tk.StringVar(value="100%")
+        ttk.Combobox(
+            opts, textvariable=self.scale_var, values=list(SCALE_OPTIONS.keys()),
+            state="readonly", width=6, style="Dark.TCombobox",
+        ).grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(2, 0))
+
+        btns = tk.Frame(container, bg=BG)
+        btns.pack(fill="x")
+        self.start_btn = _mk_button(btns, "Start (chọn vùng)", self.start, ACCENT, ACCENT_HOVER)
+        self.start_btn.pack(fill="x", pady=(0, 8))
+        self.stop_btn = _mk_button(btns, "Stop", self.stop, DANGER, DANGER_HOVER)
+        self.stop_btn.pack(fill="x", pady=(0, 8))
+        _btn_set_enabled(self.stop_btn, False)
+        self.open_folder_btn = _mk_button(btns, "Mở thư mục vừa lưu", self.open_folder, SURFACE, BORDER)
+        self.open_folder_btn.pack(fill="x")
+        _btn_set_enabled(self.open_folder_btn, False)
+
+        self._center_window()
 
         if keyboard is not None:
             try:
                 keyboard.add_hotkey("f9", lambda: self.root.after(0, self.toggle_record))
             except Exception:
                 pass  # ponytail: hook bàn phím có thể bị chặn (RDP/VM/quyền) -> im lặng bỏ qua, nút bấm vẫn chạy
+
+    def _center_window(self):
+        self.root.update_idletasks()
+        w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+        x = (self.root.winfo_screenwidth() - w) // 2
+        y = (self.root.winfo_screenheight() - h) // 3
+        self.root.geometry(f"+{x}+{y}")
 
     def toggle_record(self):
         if str(self.stop_btn["state"]) == tk.NORMAL:
@@ -290,7 +380,7 @@ class App:
         if not out_path:
             return  # người dùng bấm Cancel -> không quay
         self.out_path = out_path
-        self.open_folder_btn.config(state=tk.DISABLED)
+        _btn_set_enabled(self.open_folder_btn, False)
         self.root.withdraw()  # ẩn cửa sổ chính để không lọt vào khung chọn/video
         self.root.after(150, lambda: self._pick_region_and_record(out_path))
 
@@ -311,14 +401,14 @@ class App:
             kwargs={
                 "status_cb": lambda s: self._latest_status.__setitem__(0, s),
                 "bbox": bbox,
-                "fps": self.fps_var.get(),
+                "fps": int(self.fps_var.get()),
                 "scale": SCALE_OPTIONS[self.scale_var.get()],
             },
             daemon=True,
         )
         self.thread.start()
-        self.start_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
+        _btn_set_enabled(self.start_btn, False)
+        _btn_set_enabled(self.stop_btn, True)
         self._poll_status()
 
     def _poll_status(self):
@@ -327,13 +417,13 @@ class App:
             elapsed = int(time.time() - self._rec_start)
             self.timer_var.set(f"{elapsed // 60:02d}:{elapsed % 60:02d}")
             self._blink_on = not self._blink_on
-            self.rec_dot.config(fg="red" if self._blink_on else self.root.cget("bg"))
+            self.rec_dot.itemconfig(self._rec_dot_id, fill=DANGER if self._blink_on else SURFACE)
             self.root.after(500, self._poll_status)
 
     def stop(self):
         if self.stop_event:
             self.stop_event.set()
-        self.stop_btn.config(state=tk.DISABLED)
+        _btn_set_enabled(self.stop_btn, False)
         self.status.set("Đang dừng...")
         self._wait_finish()
 
@@ -341,11 +431,11 @@ class App:
         if self.thread and self.thread.is_alive():
             self.root.after(100, self._wait_finish)
             return
-        self.rec_dot.config(fg=self.root.cget("bg"))
+        self.rec_dot.itemconfig(self._rec_dot_id, fill=SURFACE)
         self.status.set(f"Đã lưu: {self.out_path}")
-        self.start_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
-        self.open_folder_btn.config(state=tk.NORMAL)
+        _btn_set_enabled(self.start_btn, True)
+        _btn_set_enabled(self.stop_btn, False)
+        _btn_set_enabled(self.open_folder_btn, True)
 
     def open_folder(self):
         if self.out_path:
