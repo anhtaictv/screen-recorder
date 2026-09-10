@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.mp4
+*.dll
+recordings/
+generated-images/
