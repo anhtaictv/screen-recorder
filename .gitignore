@@ -6,3 +6,4 @@ dist/
 *.dll
 recordings/
 generated-images/
+config.json

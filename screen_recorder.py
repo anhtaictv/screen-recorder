@@ -1,6 +1,7 @@
 """Quay màn hình offline, xuất MP4 không tiếng. Deps: opencv-python, mss, numpy (mss cài qua `pip install mss`)."""
 import sys
 import os
+import json
 import time
 import queue
 import threading
@@ -46,12 +47,41 @@ try:
 except Exception:
     keyboard = None
 
+try:
+    import pystray
+    from PIL import Image, ImageDraw  # icon khay hệ thống; thiếu 1 trong 2 lib -> tắt tính năng tray
+except Exception:
+    pystray = None
+
+CONFIG_PATH = os.path.join(_app_base_dir(), "config.json")
+
+
+def _load_config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+    except Exception:
+        pass  # ponytail: lưu cấu hình là tiện ích phụ, lỗi ghi (đầy đĩa, mất quyền...) không nên chặn app
+
+
+def list_monitors():
+    """Danh sách các màn hình vật lý (bỏ index 0 của mss = vùng gộp toàn bộ màn hình ảo)."""
+    with mss.MSS() as sct:
+        return list(sct.monitors[1:])
+
 
 def _bbox_to_region(bbox):
     """bbox kiểu PIL (x0,y0,x1,y1) -> dict vùng chụp của mss. None = toàn màn hình chính."""
     if bbox is None:
-        with mss.MSS() as sct:
-            mon = sct.monitors[1]
+        mon = list_monitors()[0]
         return {"left": mon["left"], "top": mon["top"], "width": mon["width"], "height": mon["height"]}
     x0, y0, x1, y1 = bbox
     return {"left": int(x0), "top": int(y0), "width": int(x1 - x0), "height": int(y1 - y0)}
@@ -133,13 +163,15 @@ def _open_writer(out_path, fps, w, h, fourccs=("avc1", "mp4v")):
 
 def record(
     stop_event: threading.Event, out_path: str, status_cb=None, bbox=None,
-    fps=DEFAULT_FPS, scale=1.0, fourccs=("avc1", "mp4v"),
+    fps=DEFAULT_FPS, scale=1.0, fourccs=("avc1", "mp4v"), pause_event: threading.Event = None,
 ):
     """Ghi thẳng 1 lần vào file cuối cùng, đúng nhịp thời gian thực (interval cố định theo fps):
     lặp lại khung mới nhất nếu máy chưa kịp chụp khung mới, giống mọi phần mềm quay màn hình thật.
     Nhờ ghi đúng nhịp thời gian thực, số khung/fps luôn tự khớp thời lượng thực — không cần đo
     trước hay mã hoá lại (remux) sau khi quay xong, nên bấm Stop là lưu xong ngay lập tức.
-    scale: tỉ lệ thu nhỏ khung hình trước khi ghi (vd 0.75) để giảm dung lượng file, 1.0 = giữ nguyên."""
+    scale: tỉ lệ thu nhỏ khung hình trước khi ghi (vd 0.75) để giảm dung lượng file, 1.0 = giữ nguyên.
+    pause_event: khi set() thì ngừng ghi khung mới (video đứng hình) mà không dừng capture, resume tự
+    khớp lại nhịp thời gian thực (không bị dồn khung để bù lại đoạn tạm dừng)."""
     region = _bbox_to_region(bbox)
     backend_name, cap_thread, cap_stop, q, first = _start_capture(region)
     if status_cb:
@@ -155,6 +187,10 @@ def record(
     next_due = start
     try:
         while not stop_event.is_set():
+            if pause_event is not None and pause_event.is_set():
+                next_due = time.time() + interval  # tránh dồn khung khi resume
+                time.sleep(0.05)
+                continue
             try:
                 while True:  # rút cạn hàng đợi, chỉ giữ khung mới nhất
                     latest = q.get_nowait()
@@ -178,14 +214,18 @@ def record(
 
 
 class RegionSelector:
-    """Overlay toàn màn hình, kéo chuột để vẽ khung vùng quay. Esc = huỷ (quay full màn hình)."""
+    """Overlay phủ đúng 1 màn hình (theo `monitor`), kéo chuột để vẽ khung vùng quay.
+    Esc = huỷ (quay full màn hình đó). Dùng geometry thủ công thay vì -fullscreen vì -fullscreen
+    trên Windows chỉ neo được vào primary monitor, không phủ đúng màn hình phụ được chọn."""
 
-    def __init__(self, root):
+    def __init__(self, root, monitor):
         self.result = None
         self.start_xy = None
         self.rect = None
+        self.monitor = monitor
         self.top = tk.Toplevel(root)
-        self.top.attributes("-fullscreen", True)
+        self.top.overrideredirect(True)
+        self.top.geometry(f"{monitor['width']}x{monitor['height']}+{monitor['left']}+{monitor['top']}")
         self.top.attributes("-alpha", 0.3)
         self.top.attributes("-topmost", True)
         self.top.configure(bg="black")
@@ -196,9 +236,10 @@ class RegionSelector:
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.top.bind("<Escape>", self._on_cancel)
         tk.Label(
-            self.top, text="Kéo chuột để chọn vùng quay  |  Esc = quay full màn hình",
+            self.top, text="Kéo chuột để chọn vùng quay  |  Esc = quay full màn hình này",
             fg="white", bg="black",
         ).place(relx=0.5, rely=0.02, anchor="n")
+        self.top.focus_force()  # overrideredirect bỏ qua focus mặc định của window manager -> ép nhận phím Esc
 
     def _on_press(self, event):
         self.start_xy = (event.x_root, event.y_root)
@@ -217,7 +258,8 @@ class RegionSelector:
         self.top.destroy()
 
     def _on_cancel(self, _event):
-        self.result = None
+        m = self.monitor
+        self.result = (m["left"], m["top"], m["left"] + m["width"], m["top"] + m["height"])
         self.top.destroy()
 
     def get_region(self):
@@ -245,6 +287,8 @@ ACCENT = "#14B8A6"
 ACCENT_HOVER = "#0D9488"
 DANGER = "#EF4444"
 DANGER_HOVER = "#DC2626"
+PAUSE = "#F59E0B"
+PAUSE_HOVER = "#D97706"
 DISABLED_BG = "#1E293B"
 DISABLED_FG = "#64748B"
 
@@ -276,6 +320,13 @@ def _btn_set_enabled(btn, enabled):
         btn.config(state=tk.DISABLED, bg=DISABLED_BG, cursor="arrow")
 
 
+def _make_tray_image(hex_color):
+    """Icon khay hệ thống: chấm tròn màu, vẽ bằng PIL thay vì cần file .ico riêng."""
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    ImageDraw.Draw(img).ellipse((6, 6, 58, 58), fill=hex_color)
+    return img
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -283,9 +334,16 @@ class App:
         root.configure(bg=BG)
         root.resizable(False, False)
         self.stop_event = None
+        self.pause_event = None
         self.thread = None
         self.out_path = None
+        self.tray_icon = None
         self._blink_on = False
+        self._paused_total = 0.0
+        self._pause_started = None
+
+        self.cfg = _load_config()
+        self.monitors = list_monitors()
 
         style = ttk.Style()
         style.theme_use("clam")  # theme 'clam' là theme duy nhất tôn trọng màu nền tuỳ chỉnh cho Combobox trên Windows
@@ -329,22 +387,36 @@ class App:
             wraplength=280, justify="left", anchor="w",
         ).pack(fill="x", pady=(8, 0))
 
+        mon_row = tk.Frame(container, bg=BG)
+        mon_row.pack(fill="x", pady=(0, 10))
+        tk.Label(mon_row, text="Màn hình", font=FONT, fg=MUTED, bg=BG).pack(anchor="w")
+        mon_labels = [f"Màn hình {i+1} ({m['width']}x{m['height']})" for i, m in enumerate(self.monitors)]
+        self.monitor_combo = ttk.Combobox(
+            mon_row, values=mon_labels, state="readonly", width=26, style="Dark.TCombobox",
+        )
+        saved_mon = self.cfg.get("monitor_index", 0)
+        self.monitor_combo.current(saved_mon if 0 <= saved_mon < len(mon_labels) else 0)
+        self.monitor_combo.pack(anchor="w", pady=(2, 0))
+
         opts = tk.Frame(container, bg=BG)
         opts.pack(fill="x", pady=(0, 14))
         tk.Label(opts, text="FPS", font=FONT, fg=MUTED, bg=BG).grid(row=0, column=0, sticky="w")
-        self.fps_var = tk.StringVar(value=str(DEFAULT_FPS))
+        saved_fps = str(self.cfg.get("fps", DEFAULT_FPS))
+        self.fps_var = tk.StringVar(value=saved_fps if int(saved_fps) in FPS_OPTIONS else str(DEFAULT_FPS))
         ttk.Combobox(
             opts, textvariable=self.fps_var, values=[str(v) for v in FPS_OPTIONS],
             state="readonly", width=6, style="Dark.TCombobox",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
         tk.Label(opts, text="Chất lượng", font=FONT, fg=MUTED, bg=BG).grid(row=0, column=1, sticky="w", padx=(20, 0))
-        self.scale_var = tk.StringVar(value="100%")
+        saved_scale = self.cfg.get("quality", "100%")
+        self.scale_var = tk.StringVar(value=saved_scale if saved_scale in SCALE_OPTIONS else "100%")
         ttk.Combobox(
             opts, textvariable=self.scale_var, values=list(SCALE_OPTIONS.keys()),
             state="readonly", width=6, style="Dark.TCombobox",
         ).grid(row=1, column=1, sticky="w", padx=(20, 0), pady=(2, 0))
         tk.Label(opts, text="Định dạng", font=FONT, fg=MUTED, bg=BG).grid(row=0, column=2, sticky="w", padx=(20, 0))
-        self.format_var = tk.StringVar(value="MP4")
+        saved_fmt = self.cfg.get("format", "MP4")
+        self.format_var = tk.StringVar(value=saved_fmt if saved_fmt in FORMAT_OPTIONS else "MP4")
         ttk.Combobox(
             opts, textvariable=self.format_var, values=list(FORMAT_OPTIONS.keys()),
             state="readonly", width=6, style="Dark.TCombobox",
@@ -354,6 +426,9 @@ class App:
         btns.pack(fill="x")
         self.start_btn = _mk_button(btns, "Start (chọn vùng)", self.start, ACCENT, ACCENT_HOVER)
         self.start_btn.pack(fill="x", pady=(0, 8))
+        self.pause_btn = _mk_button(btns, "Tạm dừng", self.toggle_pause, PAUSE, PAUSE_HOVER)
+        self.pause_btn.pack(fill="x", pady=(0, 8))
+        _btn_set_enabled(self.pause_btn, False)
         self.stop_btn = _mk_button(btns, "Stop", self.stop, DANGER, DANGER_HOVER)
         self.stop_btn.pack(fill="x", pady=(0, 8))
         _btn_set_enabled(self.stop_btn, False)
@@ -369,6 +444,31 @@ class App:
             except Exception:
                 pass  # ponytail: hook bàn phím có thể bị chặn (RDP/VM/quyền) -> im lặng bỏ qua, nút bấm vẫn chạy
 
+        if pystray is not None:
+            self._setup_tray()
+
+    def _setup_tray(self):
+        menu = pystray.Menu(
+            pystray.MenuItem("Hiện cửa sổ", lambda: self.root.after(0, self._show_window), default=True),
+            pystray.MenuItem("Dừng quay", lambda: self.root.after(0, self.stop)),
+            pystray.MenuItem("Thoát", lambda: self.root.after(0, self._quit_app)),
+        )
+        self.tray_icon = pystray.Icon("screen_recorder", _make_tray_image(ACCENT), "Screen Recorder", menu)
+        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+
+    def _show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+
+    def _quit_app(self):
+        if self.thread and self.thread.is_alive():
+            self.stop()
+            self.root.after(100, self._quit_app)  # đợi ghi xong hẳn rồi mới thoát, tránh file video hỏng
+            return
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self.root.destroy()
+
     def _center_window(self):
         self.root.update_idletasks()
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
@@ -383,8 +483,12 @@ class App:
             self.start()
 
     def start(self):
-        default_dir = os.path.join(_app_base_dir(), "recordings")
-        os.makedirs(default_dir, exist_ok=True)
+        default_dir = self.cfg.get("save_dir") or os.path.join(_app_base_dir(), "recordings")
+        try:
+            os.makedirs(default_dir, exist_ok=True)
+        except OSError:
+            default_dir = os.path.join(_app_base_dir(), "recordings")  # vd thư mục cũ nằm ở ổ USB đã rút
+            os.makedirs(default_dir, exist_ok=True)
         fmt = self.format_var.get()
         ext, _ = FORMAT_OPTIONS[fmt]
         out_path = filedialog.asksaveasfilename(
@@ -397,18 +501,32 @@ class App:
         if not out_path:
             return  # người dùng bấm Cancel -> không quay
         self.out_path = out_path
+        self.cfg.update({
+            "fps": int(self.fps_var.get()),
+            "quality": self.scale_var.get(),
+            "format": fmt,
+            "save_dir": os.path.dirname(out_path),
+            "monitor_index": self.monitor_combo.current(),
+        })
+        _save_config(self.cfg)
         _btn_set_enabled(self.open_folder_btn, False)
         self.root.withdraw()  # ẩn cửa sổ chính để không lọt vào khung chọn/video
         self.root.after(150, lambda: self._pick_region_and_record(out_path))
 
     def _pick_region_and_record(self, out_path):
-        selector = RegionSelector(self.root)
+        monitor = self.monitors[self.monitor_combo.current()]
+        selector = RegionSelector(self.root, monitor)
         bbox = selector.get_region()
         self.root.deiconify()
 
         self.status.set(f"Sẽ lưu vào: {out_path}")
         self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
         self._rec_start = time.time()
+        self._paused_total = 0.0
+        self._pause_started = None
+        _btn_set_enabled(self.pause_btn, True)
+        self.pause_btn.config(text="Tạm dừng")
         # Tkinter chỉ an toàn khi thao tác từ 1 thread duy nhất (kể cả gọi after() từ thread khác cũng
         # có thể làm treo Tcl interpreter) -> thread nền chỉ ghi vào biến thường, thread chính tự poll.
         self._latest_status = ["Recording..."]
@@ -421,27 +539,50 @@ class App:
                 "fps": int(self.fps_var.get()),
                 "scale": SCALE_OPTIONS[self.scale_var.get()],
                 "fourccs": FORMAT_OPTIONS[self.format_var.get()][1],
+                "pause_event": self.pause_event,
             },
             daemon=True,
         )
         self.thread.start()
         _btn_set_enabled(self.start_btn, False)
         _btn_set_enabled(self.stop_btn, True)
+        if self.tray_icon is not None:
+            self.root.withdraw()  # đang quay -> ẩn xuống khay, tránh chính cửa sổ app lọt vào video
         self._poll_status()
+
+    def toggle_pause(self):
+        if not (self.thread and self.thread.is_alive()):
+            return
+        if self.pause_event.is_set():
+            self._paused_total += time.time() - self._pause_started
+            self._pause_started = None
+            self.pause_event.clear()
+            self.pause_btn.config(text="Tạm dừng")
+        else:
+            self._pause_started = time.time()
+            self.pause_event.set()
+            self.pause_btn.config(text="Tiếp tục")
 
     def _poll_status(self):
         if self.thread and self.thread.is_alive():
             self.status.set(self._latest_status[0])
-            elapsed = int(time.time() - self._rec_start)
+            paused = self.pause_event.is_set()
+            live_pause = (time.time() - self._pause_started) if paused else 0.0
+            elapsed = int(time.time() - self._rec_start - self._paused_total - live_pause)
             self.timer_var.set(f"{elapsed // 60:02d}:{elapsed % 60:02d}")
-            self._blink_on = not self._blink_on
-            self.rec_dot.itemconfig(self._rec_dot_id, fill=DANGER if self._blink_on else SURFACE)
+            if paused:
+                self.rec_dot.itemconfig(self._rec_dot_id, fill=PAUSE)
+            else:
+                self._blink_on = not self._blink_on
+                self.rec_dot.itemconfig(self._rec_dot_id, fill=DANGER if self._blink_on else SURFACE)
             self.root.after(500, self._poll_status)
 
     def stop(self):
-        if self.stop_event:
-            self.stop_event.set()
+        if not (self.thread and self.thread.is_alive()):
+            return  # no-op an toàn khi bấm Stop từ tray lúc không quay
+        self.stop_event.set()
         _btn_set_enabled(self.stop_btn, False)
+        _btn_set_enabled(self.pause_btn, False)
         self.status.set("Đang dừng...")
         self._wait_finish()
 
@@ -449,10 +590,12 @@ class App:
         if self.thread and self.thread.is_alive():
             self.root.after(100, self._wait_finish)
             return
+        self._show_window()
         self.rec_dot.itemconfig(self._rec_dot_id, fill=SURFACE)
         self.status.set(f"Đã lưu: {self.out_path}")
         _btn_set_enabled(self.start_btn, True)
         _btn_set_enabled(self.stop_btn, False)
+        _btn_set_enabled(self.pause_btn, False)
         _btn_set_enabled(self.open_folder_btn, True)
 
     def open_folder(self):

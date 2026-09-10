@@ -1,6 +1,6 @@
 # Screen Recorder
 
-**v1.3.0**
+**v1.4.0**
 
 Quay màn hình offline (không tiếng) trên Windows, GUI Tkinter. Chọn vùng quay bằng cách kéo chuột hoặc quay full màn hình, xuất thẳng ra file MP4.
 
@@ -16,15 +16,19 @@ Quay màn hình offline (không tiếng) trên Windows, GUI Tkinter. Chọn vùn
 - Nút **"Mở thư mục vừa lưu"** sau khi Stop
 - Hotkey toàn cục **F9** để Start/Stop nhanh (cần lib `keyboard`, thiếu thì tự tắt tính năng này, nút bấm vẫn chạy bình thường)
 - Chọn **định dạng xuất** (MP4/MOV/AVI) ngay trong GUI
+- Chọn **màn hình** khi máy có nhiều monitor (khung chọn vùng tự phủ đúng màn hình đã chọn, kể cả màn hình phụ)
+- **Tạm dừng/Tiếp tục** khi đang quay (video đứng hình lúc tạm dừng, không bị dồn khung khi tiếp tục)
+- **Nhớ cấu hình lần trước** (FPS/chất lượng/định dạng/màn hình/thư mục lưu) trong `config.json` cạnh app
+- **Thu nhỏ xuống khay hệ thống** khi đang quay (nếu có lib `pystray`) — cửa sổ tự ẩn để không lọt vào video, click icon khay để hiện lại, menu chuột phải có "Dừng quay" và "Thoát"
 
 ## Cài đặt & chạy từ source
 
 ```bash
-pip install opencv-python mss numpy dxcam keyboard
+pip install opencv-python mss numpy dxcam keyboard pystray pillow
 python screen_recorder.py
 ```
 
-`dxcam` và `keyboard` là tuỳ chọn — thiếu vẫn chạy được (mất GPU-accel hoặc hotkey F9), không crash.
+`dxcam`, `keyboard`, `pystray`/`pillow` đều là tuỳ chọn — thiếu vẫn chạy được (mất GPU-accel, hotkey F9, hoặc khay hệ thống), không crash.
 
 ## Đóng gói thành exe
 
@@ -43,6 +47,12 @@ python screen_recorder.py --selftest
 Quay thử ~1s, kiểm tra file MP4 sinh ra hợp lệ.
 
 ## Lịch sử cập nhật
+
+### v1.4.0 — 2026-09-10
+- Chọn màn hình khi có nhiều monitor, overlay chọn vùng phủ đúng màn hình đã chọn.
+- Tạm dừng/Tiếp tục khi đang quay.
+- Nhớ cấu hình lần trước (FPS/chất lượng/định dạng/màn hình/thư mục lưu).
+- Thu nhỏ xuống khay hệ thống khi đang quay, menu tray Dừng quay/Thoát.
 
 ### v1.3.0 — 2026-09-10
 - Chọn định dạng xuất video: MP4/MOV (H.264, fallback mp4v) hoặc AVI (XVID, fallback MJPG) ngay trong GUI.
