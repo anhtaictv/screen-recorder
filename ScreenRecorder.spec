@@ -1,12 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+from PyInstaller.utils.hooks import collect_data_files
 
 a = Analysis(
     ['screen_recorder.py'],
     pathex=[],
     binaries=[('openh264-2.5.0-win64.dll', '.')],
-    datas=[],
-    hiddenimports=[],
+    datas=collect_data_files('imageio_ffmpeg'),
+    hiddenimports=['sounddevice', '_sounddevice_data'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

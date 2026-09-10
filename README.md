@@ -1,8 +1,8 @@
 # Screen Recorder
 
-**v1.4.0**
+**v1.5.0**
 
-Quay màn hình offline (không tiếng) trên Windows, GUI Tkinter. Chọn vùng quay bằng cách kéo chuột hoặc quay full màn hình, xuất thẳng ra file MP4.
+Quay màn hình offline trên Windows, GUI Tkinter, kèm ghi âm mic tuỳ chọn. Chọn vùng quay bằng cách kéo chuột hoặc quay full màn hình, xuất thẳng ra file video có tiếng.
 
 ## Tính năng
 
@@ -20,15 +20,16 @@ Quay màn hình offline (không tiếng) trên Windows, GUI Tkinter. Chọn vùn
 - **Tạm dừng/Tiếp tục** khi đang quay (video đứng hình lúc tạm dừng, không bị dồn khung khi tiếp tục)
 - **Nhớ cấu hình lần trước** (FPS/chất lượng/định dạng/màn hình/thư mục lưu) trong `config.json` cạnh app
 - **Thu nhỏ xuống khay hệ thống** khi đang quay (nếu có lib `pystray`) — cửa sổ tự ẩn để không lọt vào video, click icon khay để hiện lại, menu chuột phải có "Dừng quay" và "Thoát"
+- **Ghi âm micro** kèm video (checkbox trong GUI, mặc định bật) — thu song song với hình, tự khớp thời lượng qua nút Tạm dừng, ghép vào file cuối bằng ffmpeg kèm sẵn; thiếu lib thì tự tắt và quay video câm như cũ
 
 ## Cài đặt & chạy từ source
 
 ```bash
-pip install opencv-python mss numpy dxcam keyboard pystray pillow
+pip install opencv-python mss numpy dxcam keyboard pystray pillow sounddevice imageio-ffmpeg
 python screen_recorder.py
 ```
 
-`dxcam`, `keyboard`, `pystray`/`pillow` đều là tuỳ chọn — thiếu vẫn chạy được (mất GPU-accel, hotkey F9, hoặc khay hệ thống), không crash.
+`dxcam`, `keyboard`, `pystray`/`pillow`, `sounddevice`/`imageio-ffmpeg` đều là tuỳ chọn — thiếu vẫn chạy được (mất GPU-accel, hotkey F9, khay hệ thống, hoặc ghi mic), không crash.
 
 ## Đóng gói thành exe
 
@@ -44,9 +45,14 @@ File `openh264-2.5.0-win64.dll` được đóng gói kèm để hỗ trợ mã h
 python screen_recorder.py --selftest
 ```
 
-Quay thử ~1s, kiểm tra file MP4 sinh ra hợp lệ.
+Quay thử ~1s, kiểm tra file MP4 sinh ra hợp lệ (có thêm kiểm tra stream audio khi mic khả dụng).
 
 ## Lịch sử cập nhật
+
+### v1.5.0 — 2026-09-10
+- Ghi âm micro song song với video, ghép vào file cuối bằng ffmpeg (kèm sẵn qua `imageio-ffmpeg`, không cần cài riêng).
+- Checkbox "Ghi âm micro" trong GUI, nhớ lựa chọn vào config.
+- Lỗi mic/ghép âm tự fallback về video câm, không mất bản quay.
 
 ### v1.4.0 — 2026-09-10
 - Chọn màn hình khi có nhiều monitor, overlay chọn vùng phủ đúng màn hình đã chọn.

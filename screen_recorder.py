@@ -1,9 +1,11 @@
-"""Quay màn hình offline, xuất MP4 không tiếng. Deps: opencv-python, mss, numpy (mss cài qua `pip install mss`)."""
+"""Quay màn hình offline, xuất MP4 kèm mic tuỳ chọn.
+Deps: opencv-python, mss, numpy; ghi mic cần thêm sounddevice, imageio-ffmpeg (thiếu thì tự quay video câm)."""
 import sys
 import os
 import json
 import time
 import queue
+import subprocess
 import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
@@ -12,6 +14,17 @@ from datetime import datetime
 import cv2
 import numpy as np
 import mss
+
+try:
+    import sounddevice as sd
+    import wave
+except Exception:
+    sd = None  # thiếu lib hoặc không có driver audio -> tắt tính năng ghi mic, video vẫn quay câm bình thường
+
+try:
+    import imageio_ffmpeg
+except Exception:
+    imageio_ffmpeg = None  # thiếu lib -> không ghép được audio vào video, giữ nguyên video câm
 
 
 def _app_base_dir():
@@ -150,6 +163,42 @@ def _start_capture(region):
     return "GDI", t2, stop2, q2, first2
 
 
+def _record_audio_loop(wav_path, stop_event, pause_event, status_holder, samplerate=44100, channels=1):
+    """Ghi mic ra WAV liên tục trong luồng riêng. Khi pause_event bật thì bỏ qua mẫu thu được (không ghi)
+    để khớp với video: video cũng không ghi khung mới lúc pause -> hai file cùng độ dài thời gian thực."""
+    wf = wave.open(wav_path, "wb")
+    wf.setnchannels(channels)
+    wf.setsampwidth(2)  # int16
+    wf.setframerate(samplerate)
+
+    def callback(indata, frames, time_info, status):
+        if pause_event is None or not pause_event.is_set():
+            wf.writeframes(indata.tobytes())
+
+    try:
+        with sd.InputStream(samplerate=samplerate, channels=channels, dtype="int16", callback=callback):
+            stop_event.wait()
+    except Exception as e:
+        status_holder.append(e)  # vd không có mic -> báo lỗi ra ngoài, video vẫn giữ nguyên
+    finally:
+        wf.close()
+
+
+def _mux_audio_video(video_path, wav_path, out_path):
+    """Ghép video câm + audio WAV thành file cuối bằng ffmpeg (binary kèm theo gói imageio-ffmpeg,
+    không cần cài ffmpeg riêng). Container AVI không chuẩn hoá tốt AAC -> dùng mp3 cho AVI."""
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    audio_codec = "mp3" if out_path.lower().endswith(".avi") else "aac"
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    subprocess.run(
+        [
+            ffmpeg_exe, "-y", "-i", video_path, "-i", wav_path,
+            "-c:v", "copy", "-c:a", audio_codec, "-shortest", out_path,
+        ],
+        check=True, capture_output=True, creationflags=creationflags,
+    )
+
+
 def _open_writer(out_path, fps, w, h, fourccs=("avc1", "mp4v")):
     """Thử lần lượt các codec trong fourccs (vd avc1=H.264 nén nhẹ hơn mp4v ~6-7 lần nhưng cần openh264
     DLL); codec cuối cùng luôn là mp4v (luôn có sẵn trong OpenCV) nên writer trả về không bao giờ None."""
@@ -164,6 +213,7 @@ def _open_writer(out_path, fps, w, h, fourccs=("avc1", "mp4v")):
 def record(
     stop_event: threading.Event, out_path: str, status_cb=None, bbox=None,
     fps=DEFAULT_FPS, scale=1.0, fourccs=("avc1", "mp4v"), pause_event: threading.Event = None,
+    record_audio=True,
 ):
     """Ghi thẳng 1 lần vào file cuối cùng, đúng nhịp thời gian thực (interval cố định theo fps):
     lặp lại khung mới nhất nếu máy chưa kịp chụp khung mới, giống mọi phần mềm quay màn hình thật.
@@ -171,7 +221,8 @@ def record(
     trước hay mã hoá lại (remux) sau khi quay xong, nên bấm Stop là lưu xong ngay lập tức.
     scale: tỉ lệ thu nhỏ khung hình trước khi ghi (vd 0.75) để giảm dung lượng file, 1.0 = giữ nguyên.
     pause_event: khi set() thì ngừng ghi khung mới (video đứng hình) mà không dừng capture, resume tự
-    khớp lại nhịp thời gian thực (không bị dồn khung để bù lại đoạn tạm dừng)."""
+    khớp lại nhịp thời gian thực (không bị dồn khung để bù lại đoạn tạm dừng).
+    record_audio: có ghi thêm mic không (cần sounddevice + imageio-ffmpeg, thiếu 1 trong 2 thì tự tắt)."""
     region = _bbox_to_region(bbox)
     backend_name, cap_thread, cap_stop, q, first = _start_capture(region)
     if status_cb:
@@ -179,10 +230,25 @@ def record(
     h, w = first.shape[:2]
     out_w, out_h = (int(w * scale), int(h * scale)) if scale != 1.0 else (w, h)
 
+    use_audio = record_audio and sd is not None and imageio_ffmpeg is not None
+    video_path = out_path
+    wav_path = None
+    audio_thread = None
+    audio_stop = audio_errors = None
+    if use_audio:
+        video_path = out_path + ".video.tmp" + os.path.splitext(out_path)[1]
+        wav_path = out_path + ".audio.tmp.wav"
+        audio_stop = threading.Event()
+        audio_errors = []
+        audio_thread = threading.Thread(
+            target=_record_audio_loop, args=(wav_path, audio_stop, pause_event, audio_errors), daemon=True,
+        )
+        audio_thread.start()
+
     interval = 1.0 / fps
     frames = 0
     latest = first
-    writer = _open_writer(out_path, fps, out_w, out_h, fourccs)
+    writer = _open_writer(video_path, fps, out_w, out_h, fourccs)
     start = time.time()
     next_due = start
     try:
@@ -210,6 +276,30 @@ def record(
         writer.release()
         cap_stop.set()
         cap_thread.join(timeout=1)
+        if audio_thread is not None:
+            audio_stop.set()
+            audio_thread.join(timeout=2)
+
+    if use_audio:
+        if audio_errors:
+            if status_cb:
+                status_cb(f"Không ghi được mic ({audio_errors[0]}), lưu video câm.")
+            os.replace(video_path, out_path)
+        else:
+            try:
+                if status_cb:
+                    status_cb("Đang ghép âm thanh...")
+                _mux_audio_video(video_path, wav_path, out_path)
+                os.remove(video_path)
+            except Exception as e:
+                if status_cb:
+                    status_cb(f"Ghép âm thanh lỗi ({e}), lưu video câm.")
+                os.replace(video_path, out_path)  # không mất video đã quay được
+            finally:
+                try:
+                    os.remove(wav_path)
+                except OSError:
+                    pass
     return frames, time.time() - start
 
 
@@ -361,7 +451,7 @@ class App:
 
         tk.Label(container, text="Screen Recorder", font=FONT_TITLE, fg=TEXT, bg=BG).pack(anchor="w")
         tk.Label(
-            container, text="Quay màn hình offline · không tiếng", font=FONT, fg=MUTED, bg=BG,
+            container, text="Quay màn hình offline · kèm mic tuỳ chọn", font=FONT, fg=MUTED, bg=BG,
         ).pack(anchor="w", pady=(0, 14))
 
         card = tk.Frame(container, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
@@ -421,6 +511,17 @@ class App:
             opts, textvariable=self.format_var, values=list(FORMAT_OPTIONS.keys()),
             state="readonly", width=6, style="Dark.TCombobox",
         ).grid(row=1, column=2, sticky="w", padx=(20, 0), pady=(2, 0))
+
+        mic_available = sd is not None and imageio_ffmpeg is not None
+        self.mic_var = tk.BooleanVar(value=self.cfg.get("record_mic", True) if mic_available else False)
+        mic_cb = tk.Checkbutton(
+            container, text="Ghi âm micro" if mic_available else "Ghi âm micro (thiếu thư viện, không dùng được)",
+            variable=self.mic_var, font=FONT, fg=TEXT, bg=BG, selectcolor=SURFACE,
+            activebackground=BG, activeforeground=TEXT, highlightthickness=0,
+        )
+        mic_cb.pack(anchor="w", pady=(0, 14))
+        if not mic_available:
+            mic_cb.config(state=tk.DISABLED)
 
         btns = tk.Frame(container, bg=BG)
         btns.pack(fill="x")
@@ -507,6 +608,7 @@ class App:
             "format": fmt,
             "save_dir": os.path.dirname(out_path),
             "monitor_index": self.monitor_combo.current(),
+            "record_mic": self.mic_var.get(),
         })
         _save_config(self.cfg)
         _btn_set_enabled(self.open_folder_btn, False)
@@ -540,6 +642,7 @@ class App:
                 "scale": SCALE_OPTIONS[self.scale_var.get()],
                 "fourccs": FORMAT_OPTIONS[self.format_var.get()][1],
                 "pause_event": self.pause_event,
+                "record_audio": self.mic_var.get(),
             },
             daemon=True,
         )
@@ -616,6 +719,11 @@ def selftest():
     ok, _ = cap.read()
     cap.release()
     assert ok, "written mp4 is not readable"
+    if sd is not None and imageio_ffmpeg is not None:
+        info = subprocess.run(
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-i", tmp], capture_output=True, text=True,
+        ).stderr
+        assert "Audio:" in info, f"no audio stream muxed into output:\n{info}"
     os.remove(tmp)
     print(f"selftest OK: {frames} frames in {elapsed:.1f}s")
 
